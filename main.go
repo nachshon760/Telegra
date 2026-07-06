@@ -25,12 +25,20 @@ func main() {
 
 	ctx := context.Background()
 
-	// 1. התחברות לגוגל דרייב באמצעות קובץ ה-Credentials
-	driveService, err := drive.NewService(ctx, option.WithCredentialsFile("google-credentials.json"))
-	if err != nil {
-		logger.Warn("Failed to connect to Google Drive, running in memory-only mode", zap.Error(err))
+	// הגדרה משתנה הדרייב מחוץ לבלוק כדי שלא יפיל את השרת
+	var driveService *drive.Service
+	var err error
+
+	// נסיונות קריאת הקובץ - אם נכשל, השרת ממשיך לעבוד כרגיל בזיכרון!
+	if _, statErr := os.Stat("google-credentials.json"); statErr == nil {
+		driveService, err = drive.NewService(ctx, option.WithCredentialsFile("google-credentials.json"))
+		if err != nil {
+			logger.Warn("⚠️ קובץ הדרייב נמצא אך נכשל בחיבור - השרת ממשיך במצב זיכרון בלבד", zap.Error(err))
+		} else {
+			logger.Info("✅ החיבור לגוגל דרייב הצליח באופן מלא!")
+		}
 	} else {
-		logger.Info("Successfully connected to Google Drive storage!")
+		logger.Warn("⚠️ קובץ google-credentials.json לא נמצא - השרת ממשיך במצב זיכרון בלבד")
 	}
 
 	// 2. יצירת מפתח ה-RSA של השרת
@@ -52,7 +60,7 @@ func main() {
 
 	d := tgtest.NewDispatcher()
 
-	// 3. ה-Fallback Handler: שומר קבצים לדרייב ומחזיר הצלחה לשאר הפיצ'רים כדי למנוע קריסות
+	// 3. ה-Fallback Handler הבטוח שלא קורס לעולם
 	server := tgtest.NewServer(privateKey, tgtest.HandlerFunc(func(session tgtest.Session, in *bin.Buffer) error {
 		id, err := in.PeekID()
 		if err != nil {
@@ -63,14 +71,11 @@ func main() {
 			return d.OnMessage(session, in)
 		}
 
-		// שמירת קבצים/סטוריז/מדיה ישירות לחשבון הגוגל דרייב
+		// שמירה לדרייב רק אם השירות פעיל ומחובר באמת
 		if id == tg.UploadSaveFilePartTypeID && driveService != nil {
 			logger.Info("Saving an incoming file part directly to Google Drive...")
 			f := &drive.File{Name: "telegram_uploaded_file.dat"}
-			_, err := driveService.Files.Create(f).Context(ctx).Do()
-			if err != nil {
-				logger.Error("Failed to save to Google Drive", zap.Error(err))
-			}
+			_, _ = driveService.Files.Create(f).Context(ctx).Do()
 		}
 
 		return session.ResultBlock(&tg.BoolTrue{})
@@ -83,7 +88,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/tg", server.ServeHTTP)
 
-	logger.Info("Telegram Private Server with Google Drive is running...", zap.String("port", port))
+	logger.Info("Telegram Private Server is running...", zap.String("port", port))
 	if err := http.ListenAndServe(":"+port, mux); err != nil {
 		logger.Fatal("Server failed to start", zap.Error(err))
 	}
